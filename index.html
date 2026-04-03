@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cosmic Playground</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@200;300;400&display=swap" rel="stylesheet">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #07060b;
+      overflow: hidden;
+      font-family: 'Outfit', sans-serif;
+    }
+
+    canvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0 }
+      to   { opacity: 1 }
+    }
+
+    #title {
+      position: fixed;
+      top: 24px;
+      left: 28px;
+      font-size: 15px;
+      font-weight: 200;
+      letter-spacing: 0.12em;
+      color: rgba(255,255,255,0.25);
+      pointer-events: none;
+      animation: fadeIn 1s ease 0.5s both;
+    }
+
+    #modes {
+      position: fixed;
+      top: 18px;
+      right: 20px;
+      display: flex;
+      gap: 6px;
+      animation: fadeIn 1s ease 1s both;
+    }
+
+    #modes button {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: rgba(255,255,255,0.35);
+      font-family: 'Outfit', sans-serif;
+      font-weight: 200;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      padding: 5px 12px;
+      border-radius: 20px;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    #modes button:hover {
+      background: rgba(255,255,255,0.15);
+      color: rgba(255,255,255,0.6);
+    }
+
+    #modes button.active {
+      background: rgba(255,255,255,0.2);
+      color: rgba(255,255,255,0.85);
+      border-color: rgba(255,255,255,0.3);
+    }
+
+    #hint {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 12px;
+      font-weight: 200;
+      letter-spacing: 0.15em;
+      color: rgba(255,255,255,0.2);
+      pointer-events: none;
+      animation: fadeIn 1s ease 1.5s both;
+    }
+
+    #stats {
+      position: fixed;
+      bottom: 22px;
+      right: 24px;
+      font-size: 11px;
+      font-weight: 200;
+      letter-spacing: 0.06em;
+      color: rgba(255,255,255,0.2);
+      font-variant-numeric: tabular-nums;
+      pointer-events: none;
+      animation: fadeIn 1s ease 2s both;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+  <div id="title">Cosmic Playground</div>
+
+  <div id="modes">
+    <button data-mode="0" class="active">Nebula</button>
+    <button data-mode="1">Aurora</button>
+    <button data-mode="2">Firefly</button>
+    <button data-mode="3">Void</button>
+  </div>
+
+  <div id="hint">move · click · hold</div>
+  <div id="stats">0 particles · 0 fps</div>
+
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d', { alpha: false });
+
+    let W, H;
+
+    function resize() {
+      W = window.innerWidth;
+      H = window.innerHeight;
+      canvas.width = W;
+      canvas.height = H;
+    }
+
+    window.addEventListener('resize', resize);
+    resize();
+
+    // ── Modes ──────────────────────────────────────────────────
+    const MODES = { NEBULA: 0, AURORA: 1, FIREFLY: 2, VOID: 3 };
+    let currentMode = MODES.NEBULA;
+
+    const PALETTES = [
+      // Nebula
+      [[255,110,180],[168,85,247],[255,157,77],[34,211,238],[255,255,255]],
+      // Aurora
+      [[0,255,136],[14,165,233],[56,189,248],[134,239,172]],
+      // Firefly
+      [[255,215,0],[255,140,0],[255,224,102],[255,244,204]],
+      // Void
+      [[255,255,255],[192,192,192],[224,224,224]],
+    ];
+
+    const MODE_GLOW_MULT = [5, 4, 8, 3];
+
+    function getModePhysics(mode) {
+      switch (mode) {
+        case 0: return { gravity: 0.012,  dragMin: 0.985, dragMax: 0.992, oscMult: 1   }; // Nebula
+        case 1: return { gravity: -0.005, dragMin: 0.990, dragMax: 0.997, oscMult: 1   }; // Aurora
+        case 2: return { gravity: 0,      dragMin: 0.988, dragMax: 0.995, oscMult: 2.5 }; // Firefly
+        case 3: return { gravity: -0.008, dragMin: 0.992, dragMax: 0.998, oscMult: 0.5 }; // Void
+      }
+    }
+
+    // ── Particle Pool ──────────────────────────────────────────
+    const MAX = 2500;
+    const pool = new Float32Array(MAX * 15);
+    // [0,1]=x,y | [2,3]=vx,vy | [4]=life | [5]=maxLife
+    // [6]=age   | [7]=size    | [8,9,10]=r,g,b
+    // [11]=oscillation | [12]=oscSpeed | [13]=drag | [14]=gravity
+    const pMode = new Uint8Array(MAX);
+    let aliveCount = 0;
+
+    function spawn(x, y, vx, vy, mode) {
+      const i = aliveCount >= MAX ? 0 : aliveCount++;
+      const o = i * 15;
+      const phy = getModePhysics(mode);
+      const col = PALETTES[mode][Math.floor(Math.random() * PALETTES[mode].length)];
+      pool[o]    = x;
+      pool[o+1]  = y;
+      pool[o+2]  = vx;
+      pool[o+3]  = vy;
+      pool[o+4]  = 1.0;
+      pool[o+5]  = 200 + Math.random() * 300;
+      pool[o+6]  = 0;
+      pool[o+7]  = 0.5 + Math.random() * 3;
+      pool[o+8]  = col[0];
+      pool[o+9]  = col[1];
+      pool[o+10] = col[2];
+      pool[o+11] = Math.random() * Math.PI * 2;
+      pool[o+12] = (0.02 + Math.random() * 0.04) * phy.oscMult;
+      pool[o+13] = phy.dragMin + Math.random() * (phy.dragMax - phy.dragMin);
+      pool[o+14] = phy.gravity;
+      pMode[i]   = mode;
+    }
+
+    function kill(i) {
+      const last = aliveCount - 1;
+      if (i !== last) {
+        const src = last * 15;
+        const dst = i * 15;
+        for (let k = 0; k < 15; k++) pool[dst + k] = pool[src + k];
+        pMode[i] = pMode[last];
+      }
+      aliveCount--;
+    }
+
+    // ── Mouse / Touch State ────────────────────────────────────
+    const mouse = { x: 0, y: 0, px: 0, py: 0, speed: 0, down: false, lastEmit: 0 };
+
+    function setPos(x, y) {
+      mouse.px = mouse.x;
+      mouse.py = mouse.y;
+      mouse.x  = x;
+      mouse.y  = y;
+      const dx = mouse.x - mouse.px;
+      const dy = mouse.y - mouse.py;
+      mouse.speed = Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function emitTrail() {
+      if (mouse.speed < 1) return;
+      const now = Date.now();
+      if (now - mouse.lastEmit < 16) return;
+      mouse.lastEmit = now;
+      const count = Math.min(8, Math.ceil(mouse.speed / 4));
+      const dx = mouse.x - mouse.px;
+      const dy = mouse.y - mouse.py;
+      for (let i = 0; i < count; i++) {
+        spawn(
+          mouse.x, mouse.y,
+          dx * 0.3 + (Math.random() - 0.5) * 1.5,
+          dy * 0.3 + (Math.random() - 0.5) * 1.5,
+          currentMode
+        );
+      }
+    }
+
+    function burst(x, y) {
+      const count = 60 + Math.random() * 40;
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const spd   = 1 + Math.random() * 6;
+        spawn(x, y, Math.cos(angle) * spd, Math.sin(angle) * spd, currentMode);
+      }
+    }
+
+    // Mouse events
+    canvas.addEventListener('mousemove', e => { setPos(e.clientX, e.clientY); emitTrail(); });
+    canvas.addEventListener('mousedown', e => { mouse.down = true; burst(e.clientX, e.clientY); });
+    canvas.addEventListener('mouseup',   () => { mouse.down = false; });
+
+    // Touch events
+    canvas.addEventListener('touchmove', e => {
+      e.preventDefault();
+      setPos(e.touches[0].clientX, e.touches[0].clientY);
+      emitTrail();
+    }, { passive: false });
+    canvas.addEventListener('touchstart', e => {
+      e.preventDefault();
+      mouse.down = true;
+      setPos(e.touches[0].clientX, e.touches[0].clientY);
+      burst(mouse.x, mouse.y);
+    }, { passive: false });
+    canvas.addEventListener('touchend', () => { mouse.down = false; });
+
+    // ── Update ─────────────────────────────────────────────────
+    function update() {
+      for (let i = aliveCount - 1; i >= 0; i--) {
+        const o = i * 15;
+        pool[o+6]++;                                    // age++
+        pool[o+4] = 1 - pool[o+6] / pool[o+5];         // life
+
+        if (pool[o+4] <= 0) { kill(i); continue; }
+
+        // Hold: gravity attract
+        if (mouse.down) {
+          const dx   = mouse.x - pool[o];
+          const dy   = mouse.y - pool[o+1];
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < 300 && dist > 1) {
+            const force = 0.8 / dist;
+            pool[o+2] += dx / dist * force;
+            pool[o+3] += dy / dist * force;
+          }
+        }
+
+        pool[o+3]  += pool[o+14];                       // vy += gravity
+        pool[o+2]  *= pool[o+13];                       // vx *= drag
+        pool[o+3]  *= pool[o+13];                       // vy *= drag
+        pool[o]    += pool[o+2];                        // x += vx
+        pool[o+1]  += pool[o+3];                        // y += vy
+        pool[o+11] += pool[o+12];                       // oscillation
+      }
+    }
+
+    // ── Spatial Grid ──────────────────────────────────────────
+    const CELL = 60;
+    const CONN_DIST_SQ = 3000;
+    const CELL_OFFSETS = [[0,0],[1,0],[0,1],[1,1],[0,-1],[1,-1]];
+    let grid = {};
+
+    function buildGrid() {
+      grid = {};
+      for (let i = 0; i < aliveCount; i++) {
+        const col = Math.floor(pool[i * 15]     / CELL);
+        const row = Math.floor(pool[i * 15 + 1] / CELL);
+        const key = col + ',' + row;
+        if (!grid[key]) grid[key] = [];
+        grid[key].push(i);
+      }
+    }
+
+    function drawConnections() {
+      ctx.beginPath();
+      for (let i = 0; i < aliveCount; i++) {
+        if (pMode[i] === MODES.VOID) continue;
+        const ix  = pool[i * 15];
+        const iy  = pool[i * 15 + 1];
+        const col = Math.floor(ix / CELL);
+        const row = Math.floor(iy / CELL);
+        for (const [dc, dr] of CELL_OFFSETS) {
+          const neighbors = grid[(col + dc) + ',' + (row + dr)];
+          if (!neighbors) continue;
+          for (const j of neighbors) {
+            if (j <= i) continue;
+            const dx     = ix - pool[j * 15];
+            const dy     = iy - pool[j * 15 + 1];
+            const distSq = dx * dx + dy * dy;
+            if (distSq < CONN_DIST_SQ) {
+              ctx.moveTo(ix, iy);
+              ctx.lineTo(pool[j * 15], pool[j * 15 + 1]);
+            }
+          }
+        }
+      }
+      ctx.strokeStyle = 'rgba(180,180,255,0.1)';
+      ctx.lineWidth   = 0.5;
+      ctx.stroke();
+    }
+
+    // ── Glow Sprite Cache ──────────────────────────────────────
+    const glowCache = {};
+
+    function getGlowSprite(r, g, b) {
+      const key = (r << 16) | (g << 8) | b;
+      if (glowCache[key]) return glowCache[key];
+      const c  = document.createElement('canvas');
+      c.width  = c.height = 64;
+      const cx = c.getContext('2d');
+      const grad = cx.createRadialGradient(32, 32, 0, 32, 32, 32);
+      grad.addColorStop(0,   `rgba(${r},${g},${b},0.8)`);
+      grad.addColorStop(0.4, `rgba(${r},${g},${b},0.3)`);
+      grad.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+      cx.fillStyle = grad;
+      cx.fillRect(0, 0, 64, 64);
+      glowCache[key] = c;
+      return c;
+    }
+
+    // ── Draw ───────────────────────────────────────────────────
+    function draw() {
+      // Trail effect — phủ đen bán trong suốt thay vì clearRect
+      ctx.fillStyle = currentMode === MODES.VOID
+        ? 'rgba(7,6,11,0.08)'
+        : 'rgba(7,6,11,0.06)';
+      ctx.fillRect(0, 0, W, H);
+
+      // Connection lines
+      buildGrid();
+      drawConnections();
+
+      // Pass 1: Glow sprites
+      ctx.globalCompositeOperation = 'source-over';
+      for (let i = 0; i < aliveCount; i++) {
+        const o        = i * 15;
+        const glowSize = pool[o+7] * MODE_GLOW_MULT[pMode[i]];
+        const alpha    = pool[o+4] * (pMode[i] === MODES.VOID ? 0.15 : 0.5);
+        ctx.globalAlpha = alpha;
+        const sprite = getGlowSprite(pool[o+8]|0, pool[o+9]|0, pool[o+10]|0);
+        ctx.drawImage(sprite, pool[o] - glowSize/2, pool[o+1] - glowSize/2, glowSize, glowSize);
+      }
+
+      // Pass 2: Core arcs (loop riêng — giữ chấm sáng rõ ở tâm)
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      for (let i = 0; i < aliveCount; i++) {
+        const o = i * 15;
+        const r = pool[o+7] * 0.4;
+        ctx.moveTo(pool[o] + r, pool[o+1]);
+        ctx.arc(pool[o], pool[o+1], r, 0, Math.PI * 2);
+      }
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // ── Mode Switcher ──────────────────────────────────────────
+    const modeButtons = document.querySelectorAll('#modes button');
+    modeButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        currentMode = parseInt(btn.dataset.mode);
+        modeButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+      });
+    });
+
+    // ── Mobile hint ────────────────────────────────────────────
+    if ('ontouchstart' in window) {
+      document.getElementById('hint').textContent = 'swipe · tap · press';
+    }
+
+    // ── FPS Counter ────────────────────────────────────────────
+    const statsEl = document.getElementById('stats');
+    let lastFpsTime = performance.now();
+    let frameCount  = 0;
+    let fps         = 0;
+
+    setInterval(() => {
+      const now     = performance.now();
+      fps           = Math.round(frameCount / ((now - lastFpsTime) / 1000));
+      lastFpsTime   = now;
+      frameCount    = 0;
+      statsEl.textContent = `${aliveCount} particles · ${fps} fps`;
+    }, 500);
+
+    // ── Loop ───────────────────────────────────────────────────
+    function loop() {
+      frameCount++;
+      update();
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    loop();
+  </script>
+</body>
+</html>
